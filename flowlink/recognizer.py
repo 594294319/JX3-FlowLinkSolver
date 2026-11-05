@@ -16,6 +16,8 @@ image: PIL.Image (RGB)
 import collections
 import numpy as np
 
+MAX_GRID = 12
+
 
 def _background_color(a):
     """取四角区域中位数作为背景色。"""
@@ -81,45 +83,140 @@ def _find_endpoints(a):
     return endpoints
 
 
-def _estimate_step(coords):
-    """从一维坐标估计格距：相邻差的中位数（可能是多格间距）。"""
-    coords = sorted(coords)
-    if len(coords) < 2:
+def _find_dark_cells(a, bg):
+    """提取未占用格的暗圆连通块，返回圆心 [(x,y), ...]。
+
+    棋盘每一格中心都有一个略亮于背景的暗圆（被端点占用的格是亮圆点）。
+    用这些暗圆反推整幅网格的列/行位置，比只靠稀疏端点估步长更稳。
+    """
+    H, W, _ = a.shape
+    lum = a.mean(axis=2)
+    bg_lum = float(bg.mean())
+    mask = (lum > bg_lum + 4) & (lum < bg_lum + 40)
+    visited = np.zeros((H, W), dtype=bool)
+    cells = []
+    ys, xs = np.where(mask)
+    for y0, x0 in zip(ys, xs):
+        if visited[y0, x0]:
+            continue
+        q = collections.deque([(y0, x0)])
+        visited[y0, x0] = True
+        px, py = [], []
+        while q:
+            y, x = q.popleft()
+            px.append(x); py.append(y)
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < H and 0 <= nx < W and mask[ny, nx] and not visited[ny, nx]:
+                        visited[ny, nx] = True
+                        q.append((ny, nx))
+        area = len(px)
+        if area < 8 or area > 220:
+            continue
+        w = max(px) - min(px) + 1
+        h = max(py) - min(py) + 1
+        if max(w, h) / max(1, min(w, h)) > 1.8:  # 长条/边框噪点
+            continue
+        cells.append((float(np.mean(px)), float(np.mean(py))))
+    return cells
+
+
+def _median_gap(vals):
+    """一维相邻差（>6px）的中位数，作为粗格距。"""
+    vals = sorted(vals)
+    if len(vals) < 2:
         return None
-    diffs = [coords[i + 1] - coords[i] for i in range(len(coords) - 1)]
+    diffs = [vals[i + 1] - vals[i] for i in range(len(vals) - 1)]
     diffs = [d for d in diffs if d > 6]
     if not diffs:
         return None
     return float(np.median(diffs))
 
 
-def _norm_step(px, py):
-    """把多格间距折算成单格步长，返回 (step, 估算依据)。"""
+def _cluster_axis(vals, step):
+    """按相邻 gap > 0.6*step 把一维坐标聚成簇，返回簇中心（升序）。"""
+    vals = sorted(vals)
+    groups = [[vals[0]]]
+    for v in vals[1:]:
+        if v - groups[-1][-1] > step * 0.6:
+            groups.append([v])
+        else:
+            groups[-1].append(v)
+    return [float(np.mean(g)) for g in groups]
+
+
+def _nearest(centers, v):
+    return min(range(len(centers)), key=lambda i: abs(centers[i] - v))
+
+
+def _fit_by_cells(endpoints, cells, W, H):
+    """用暗圆 + 亮端点聚类列/行网格。返回 (N, step) 或 None。"""
+    if len(cells) < 4:
+        return None
+    xs = [c[0] for c in cells] + [e["x"] for e in endpoints]
+    ys = [c[1] for c in cells] + [e["y"] for e in endpoints]
+    sx_gap = _median_gap(xs)
+    sy_gap = _median_gap(ys)
+    if sx_gap is None or sy_gap is None:
+        return None
+    sx = _cluster_axis(xs, sx_gap)
+    sy = _cluster_axis(ys, sy_gap)
+    if not (2 <= len(sx) <= MAX_GRID) or not (2 <= len(sy) <= MAX_GRID):
+        return None
+
+    col_step = float(np.median(np.diff(sx))) if len(sx) >= 2 else sx_gap
+    row_step = float(np.median(np.diff(sy))) if len(sy) >= 2 else sy_gap
+    step = (col_step + row_step) / 2
+
+    # 端点归入最近簇，并校验没有偏离格点太远
+    for e in endpoints:
+        ci = _nearest(sx, e["x"])
+        ri = _nearest(sy, e["y"])
+        if abs(sx[ci] - e["x"]) > step * 0.55 or abs(sy[ri] - e["y"]) > step * 0.55:
+            return None
+        e["c"], e["r"] = ci, ri
+
+    R, C = len(sy), len(sx)
+    # 连线模式为正方形；框选带了多余边时取较小边长，越界端点交给上层校验
+    N = min(R, C)
+    return N, step
+
+
+def _fallback_layout(endpoints, W, H):
+    """回退：仅靠稀疏端点的步长/跨度估算（旧逻辑）。"""
+    xs = [e["x"] for e in endpoints]
+    ys = [e["y"] for e in endpoints]
+    px = _median_gap(xs)
+    py = _median_gap(ys)
     if px is None and py is None:
         return None
     if px is None:
-        return py
-    if py is None:
-        return px
-    lo, hi = sorted((px, py))
-    k = max(1, round(hi / lo))
-    hi = hi / k
-    return (lo + hi) / 2
+        step = py
+    elif py is None:
+        step = px
+    else:
+        lo, hi = sorted((px, py))
+        k = max(1, round(hi / lo))
+        step = (lo + hi / k) / 2
 
+    xt, yt = min(xs), min(ys)
+    for e in endpoints:
+        e["c"] = int(round((e["x"] - xt) / step))
+        e["r"] = int(round((e["y"] - yt) / step))
+    c_max = max(e["c"] for e in endpoints)
+    r_max = max(e["r"] for e in endpoints)
+    n_w = max(1, round(W / step))
+    n_h = max(1, round(H / step))
+    N = min(n_w, n_h, c_max + 2, r_max + 2)
+    N = max(N, c_max + 1, r_max + 1)
 
-def _grid_bounds(a, bg):
-    """用 cell（略亮于背景的暗块）投影估计网格整体边界。"""
-    H, W, _ = a.shape
-    lum = a.mean(axis=2)
-    bg_lum = float(bg.mean())
-    cell = (lum > bg_lum + 6) & (lum < bg_lum + 75)
-    colfrac = cell.mean(axis=0)
-    rowfrac = cell.mean(axis=1)
-    cols = np.where(colfrac > 0.25)[0]
-    rows = np.where(rowfrac > 0.25)[0]
-    if len(cols) == 0 or len(rows) == 0:
-        return None
-    return int(cols[0]), int(cols[-1]), int(rows[0]), int(rows[-1])
+    x0 = (W - (N - 1) * step) / 2
+    y0 = (H - (N - 1) * step) / 2
+    for e in endpoints:
+        e["c"] = int(round((e["x"] - x0) / step))
+        e["r"] = int(round((e["y"] - y0) / step))
+    return N, step
 
 
 def _cluster_colors(endpoints, thr=65):
@@ -152,36 +249,14 @@ def recognize(image, color_thr=35):
         return {"ok": False, "message": f"只识别到 {len(endpoints)} 个端点，请重新框选包含完整点阵的区域。",
                 "N": 0, "pairs": [], "colors": {}, "endpoints": []}
 
-    # 步长（折算到单格）
-    xs = [e["x"] for e in endpoints]
-    ys = [e["y"] for e in endpoints]
-    px = _estimate_step(xs)
-    py = _estimate_step(ys)
-    step = _norm_step(px, py)
-    if step is None:
+    cells = _find_dark_cells(a, bg)
+    layout = _fit_by_cells(endpoints, cells, W, H)
+    if layout is None:
+        layout = _fallback_layout(endpoints, W, H)
+    if layout is None:
         return {"ok": False, "message": "无法估计格子间距，请放大截图后重试。",
                 "N": 0, "pairs": [], "colors": {}, "endpoints": []}
-
-    # 临时映射，得到端点覆盖的最大行列索引
-    xt, yt = min(xs), min(ys)
-    for e in endpoints:
-        e["c"] = int(round((e["x"] - xt) / step))
-        e["r"] = int(round((e["y"] - yt) / step))
-    c_max = max(e["c"] for e in endpoints)
-    r_max = max(e["r"] for e in endpoints)
-
-    # 截图尺寸估算与端点覆盖范围折中（外圈最多留 1 行/列空）
-    n_w = max(1, round(W / step))
-    n_h = max(1, round(H / step))
-    N = min(n_w, n_h, c_max + 2, r_max + 2)
-    N = max(N, c_max + 1, r_max + 1)
-
-    # 居中基准：第一格中心，重新映射
-    x0 = (W - (N - 1) * step) / 2
-    y0 = (H - (N - 1) * step) / 2
-    for e in endpoints:
-        e["c"] = int(round((e["x"] - x0) / step))
-        e["r"] = int(round((e["y"] - y0) / step))
+    N, step = layout
 
     # 越界保护
     bad = [e for e in endpoints if not (0 <= e["r"] < N and 0 <= e["c"] < N)]

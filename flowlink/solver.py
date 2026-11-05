@@ -403,22 +403,35 @@ def solve_trace(R, C, start, end, red, portal=None, dfs_timeout=5.0):
             elif cur == p2:
                 yield p1, True
 
-    def _connected(cur, visited_mask):
-        """未访问可走格与终点是否仍和当前格连通（已访问格阻挡）。"""
+    def _connected(cur, visited_mask, used):
+        """未访问可走格与终点是否仍和当前格连通（已访问格阻挡）。
+
+        连通图除四邻外，未使用传送门时把 p1↔p2 瞬移边也算入；
+        否则需要靠传送门才能到达的区域会被误判为不连通而错杀有解分支。
+        """
         seen = {cur}
         q = deque([cur])
+
+        def _add(cell):
+            if cell in red or cell in seen:
+                return
+            if visited_mask >> _idx(cell) & 1:
+                return
+            seen.add(cell)
+            q.append(cell)
+
         while q:
             r, c = q.popleft()
             for dr, dc in DIRS:
                 nr, nc = r + dr, c + dc
-                if not (0 <= nr < R and 0 <= nc < C):
-                    continue
-                if (nr, nc) in red or (nr, nc) in seen:
-                    continue
-                if visited_mask >> _idx((nr, nc)) & 1:
-                    continue
-                seen.add((nr, nc))
-                q.append((nr, nc))
+                if 0 <= nr < R and 0 <= nc < C:
+                    _add((nr, nc))
+            # 传送门双向边（整局仅一次，未用前视为可用）
+            if p1 is not None and not used:
+                if (r, c) == p1:
+                    _add(p2)
+                elif (r, c) == p2:
+                    _add(p1)
         return end in seen
 
     def _dfs(cur, used):
@@ -441,7 +454,7 @@ def solve_trace(R, C, start, end, red, portal=None, dfs_timeout=5.0):
             visited |= 1 << _idx(nxt)
             path.append(nxt)
             new_used = used or is_portal
-            if _connected(nxt, visited) and _dfs(nxt, new_used):
+            if _connected(nxt, visited, new_used) and _dfs(nxt, new_used):
                 return True
             path.pop()
             visited &= ~(1 << _idx(nxt))

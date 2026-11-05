@@ -495,7 +495,7 @@ class ManualDialog(QtWidgets.QDialog):
         self.canvas = ManualCanvas(self)
         lay.addWidget(self.canvas, alignment=QtCore.Qt.AlignHCenter)
         self.status = QtWidgets.QLabel("")
-        self.status.setStyleSheet("color:#333; padding:4px;")
+        self.status.setStyleSheet("color:#d9534f; padding:4px;")
         lay.addWidget(self.status)
 
         row = QtWidgets.QHBoxLayout()
@@ -536,6 +536,11 @@ class ManualDialog(QtWidgets.QDialog):
 
     def set_status(self, text):
         self.status.setText(text)
+
+    def _fail(self, msg):
+        """最终校验失败：状态栏红字 + 弹窗强提示，避免用户以为卡死无反应。"""
+        self.set_status(msg)
+        QtWidgets.QMessageBox.warning(self, "无法创建关卡", msg)
 
     # ---- 模式 / 阶段 ----
     def _on_mode_toggle(self, checked):
@@ -707,16 +712,16 @@ class ManualDialog(QtWidgets.QDialog):
     # ---- 提交 ----
     def _accept_flow(self):
         if self.stage == "size" or self.R < 2:
-            self.set_status("请先拖拽框选题目大小。")
+            self._fail("请先拖拽框选题目大小。")
             return
         if self.R != self.C:
-            self.set_status("连线模式请拖出正方形棋盘（行数=列数）。")
+            self._fail("连线模式请拖出正方形棋盘（行数=列数）。")
             return
         if len(self.endpoints) < 2:
-            self.set_status("请至少放置一对端点。")
+            self._fail("请至少放置一对端点。")
             return
         if len(self.endpoints) % 2 != 0:
-            self.set_status("端点需成对：还差一个同色端点。")
+            self._fail("端点需成对：还差一个同色端点。")
             return
         pairs = []
         colors = {}
@@ -730,7 +735,7 @@ class ManualDialog(QtWidgets.QDialog):
 
     def _accept_trace(self):
         if self.start is None or self.end is None:
-            self.set_status("请先设置起点和终点。")
+            self._fail("请先设置起点和终点。")
             return
         portal = tuple(self.portal) if len(self.portal) == 2 else None
         self.submitted_trace.emit(self.R, self.C, self.start, self.end,
@@ -784,6 +789,35 @@ class MainWindow(QtWidgets.QWidget):
         self.status = QtWidgets.QLabel("点击「截图识别」框选游戏点阵区域。")
         self.status.setStyleSheet("color:#333; padding:6px;")
         layout.addWidget(self.status)
+
+        foot = QtWidgets.QHBoxLayout()
+        foot.addStretch(1)
+        self.chk_top = QtWidgets.QCheckBox("窗口置顶")
+        self.chk_top.setToolTip("勾选后让本窗口始终显示在其他窗口最前，方便对照答案解谜")
+        self.chk_top.toggled.connect(self._on_topmost_toggle)
+        foot.addWidget(self.chk_top)
+        layout.addLayout(foot)
+
+    # ---- 窗口置顶开关 ----
+    def _on_topmost_toggle(self, checked):
+        self.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, checked)
+        self.show()
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            HWND_TOPMOST = -1
+            HWND_NOTOPMOST = -2
+            SWP_NOMOVE = 0x0001
+            SWP_NOSIZE = 0x0002
+            SWP_SHOWWINDOW = 0x0040
+            user32.SetWindowPos(
+                hwnd, HWND_TOPMOST if checked else HWND_NOTOPMOST,
+                0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        except Exception:
+            pass
 
     # ---- 截图 ----
     def on_capture(self):
@@ -862,33 +896,39 @@ class MainWindow(QtWidgets.QWidget):
         dlg.exec()
 
     def _on_manual_done(self, N, pairs, colors, endpoints):
-        self.mode = "flow"
-        self.trace = None
-        self.trace_path = None
-        self.N = N
-        self.pairs = pairs
-        self.colors = colors
-        self.endpoints = endpoints
-        self.solution = None
-        self.method_lbl.setText("")
-        self.status.setText("已按手动设置建立关卡，正在求解…")
-        self._refresh()
-        self._start_solve()
+        try:
+            self.mode = "flow"
+            self.trace = None
+            self.trace_path = None
+            self.N = N
+            self.pairs = pairs
+            self.colors = colors
+            self.endpoints = endpoints
+            self.solution = None
+            self.method_lbl.setText("")
+            self.status.setText("已按手动设置建立关卡，正在求解…")
+            self._refresh()
+            self._start_solve()
+        except Exception as e:
+            self.status.setText(f"导入连线关卡失败：{e}")
 
     def _on_trace_done(self, R, C, start, end, red, portal):
-        self.mode = "trace"
-        self.N = R
-        self.pairs = []
-        self.endpoints = []
-        self.colors = {}
-        self.solution = None
-        self.trace = {"R": R, "C": C, "start": start, "end": end,
-                      "red": set(red), "portal": portal}
-        self.trace_path = None
-        self.method_lbl.setText("")
-        self.status.setText("已按盘迹设置建立关卡，正在求解…")
-        self._refresh()
-        self._start_trace_solve()
+        try:
+            self.mode = "trace"
+            self.N = R
+            self.pairs = []
+            self.endpoints = []
+            self.colors = {}
+            self.solution = None
+            self.trace = {"R": R, "C": C, "start": start, "end": end,
+                          "red": set(red), "portal": portal}
+            self.trace_path = None
+            self.method_lbl.setText("")
+            self.status.setText("已按盘迹设置建立关卡，正在求解…")
+            self._refresh()
+            self._start_trace_solve()
+        except Exception as e:
+            self.status.setText(f"导入盘迹关卡失败：{e}")
 
     # ---- 求解 ----
     def on_solve(self):
