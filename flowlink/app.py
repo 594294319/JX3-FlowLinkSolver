@@ -140,9 +140,13 @@ class BoardWidget(QtWidgets.QWidget):
             pen.setCapStyle(QtCore.Qt.RoundCap)
             pen.setJoinStyle(QtCore.Qt.RoundJoin)
             p.setPen(pen)
+            portal_set = set(t["portal"]) if t["portal"] else None
             for i in range(1, len(self.trace_path)):
-                p.drawLine(self._center(*self.trace_path[i - 1]),
-                           self._center(*self.trace_path[i]))
+                a, b = self.trace_path[i - 1], self.trace_path[i]
+                # 传送门瞬移边不画直线，避免把自动传送与普通路线混淆
+                if portal_set and {a, b} == portal_set:
+                    continue
+                p.drawLine(self._center(*a), self._center(*b))
         # 起终点标记
         for cell, color, mark in ((t["start"], self.START_COLOR, "S"),
                                   (t["end"], self.END_COLOR, "T")):
