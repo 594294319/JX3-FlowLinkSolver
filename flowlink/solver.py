@@ -392,16 +392,24 @@ def solve_trace(R, C, start, end, red, portal=None, dfs_timeout=5.0):
     nodes = 0
 
     def _neighbors(cur, used):
+        # 踏入传送门后（瞬移尚未使用）：强制瞬移到另一端，
+        # 不允许从传送门格按四邻普通离开。
+        if p1 is not None and not used and (cur == p1 or cur == p2):
+            other = p2 if cur == p1 else p1
+            yield other, True
+            return
         r, c = cur
         for dr, dc in DIRS:
             nr, nc = r + dr, c + dc
-            if 0 <= nr < R and 0 <= nc < C and (nr, nc) not in red:
-                yield (nr, nc), False
-        if p1 is not None and not used:
-            if cur == p1:
-                yield p2, True
-            elif cur == p2:
-                yield p1, True
+            if not (0 <= nr < R and 0 <= nc < C):
+                continue
+            nxt = (nr, nc)
+            if nxt in red:
+                continue
+            # 瞬移已使用后，不能再进入任一传送门格。
+            if used and p1 is not None and (nxt == p1 or nxt == p2):
+                continue
+            yield nxt, False
 
     def _connected(cur, visited_mask, used):
         """未访问可走格与终点是否仍和当前格连通（已访问格阻挡）。
@@ -496,6 +504,24 @@ def validate_trace(R, C, start, end, red, portal, path):
             (prev == p1 and cell == p2) or (prev == p2 and cell == p1))
         if not adj and not portal_edge:
             return False, f"第 {i} 步不相邻"
+
+    # 传送门规则：必走；踏入一端后必须瞬移到另一端，不可普通进出。
+    if portal:
+        if p1 not in seen or p2 not in seen:
+            return False, "传送门未被经过"
+        portal_idx = [i for i in range(1, len(path))
+                      if {path[i - 1], path[i]} == {p1, p2}]
+        if len(portal_idx) != 1:
+            return False, "传送门必须通过瞬移边成对经过一次"
+        k = portal_idx[0]
+        enter, land = path[k - 1], path[k]  # 踏入端 / 落地端
+        # 踏入端的前驱只能是普通格（四邻踏入），不能是另一端传送门以外的传送门
+        if k - 2 >= 0 and path[k - 2] in (p1, p2):
+            return False, "传送门进入方式非法"
+        # 落地端的后继只能是普通格（四邻离开），不能再进传送门
+        if k + 1 < len(path) and path[k + 1] in (p1, p2):
+            return False, "传送门离开方式非法"
+
     walkable = {(r, c) for r in range(R) for c in range(C) if (r, c) not in red}
     if seen != walkable:
         return False, f"未走满：{len(seen)}/{len(walkable)}"
